@@ -163,7 +163,9 @@ lib/color.mjs         颜色格式换算（0xAABBGGRR ↔ 面板色）
 lib/rime.mjs          调用鼠须管命令行部署
 lib/fonts.mjs         字体探测（tools/fontprobe.swift，经 macOS 字体接口）
 tools/fontprobe.swift 字体解析脚本（可选，缺失时字体回退提示降级）
-public/index.html     面板界面（无构建步骤，单文件）
+public/index.html     面板结构（无构建步骤）
+public/styles.css     面板样式（CSS 变量令牌）
+public/app.js         面板逻辑（预览、编辑、应用）
 test/config.test.mjs  单元测试
 scripts/package-release.sh  打包发布 zip（含依赖）
 ```
