@@ -8,9 +8,17 @@ import {
   applyEdits,
   readModel,
   undoLast,
+  validateAppOptions,
+  validatePageSize,
   validateValues,
+  verifyPageSize,
   verifyValues,
 } from '../lib/config.mjs';
+
+const BASE_APP_OPTIONS = {
+  'com.apple.Terminal': { ascii_mode: true, no_inline: true },
+  'org.vim.MacVim': { ascii_mode: true, no_inline: true, vim_mode: true },
+};
 
 const CUSTOM = `# 测试注释：不要丢
 patch:
@@ -62,10 +70,22 @@ function makeFixture() {
   const parsed = parse(CUSTOM, { schema: 'failsafe' });
   const build = {
     __build_info: { rime_version: '1.16.0' },
+    app_options: { ...BASE_APP_OPTIONS },
     ...parsed.patch,
   };
   fs.writeFileSync(path.join(dir, 'build', 'squirrel.yaml'), stringify(build));
+  fs.writeFileSync(
+    path.join(dir, 'build', 'default.yaml'),
+    stringify({ menu: { page_size: 6 } }),
+  );
   return dir;
+}
+
+function redeployDefault(dir, pageSize) {
+  fs.writeFileSync(
+    path.join(dir, 'build', 'default.yaml'),
+    stringify({ menu: { page_size: pageSize } }),
+  );
 }
 
 function lightValues(model) {
@@ -465,4 +485,258 @@ test('新键校验与部署校验', () => {
   );
   const clean = verifyValues(dir, { schemeId: 'wechat', sync: false, values });
   assert.deepEqual(clean, []);
+});
+
+test('读取每页候选数与按应用生效列表', () => {
+  const dir = makeFixture();
+  const model = readModel(dir);
+  assert.equal(model.menu.pageSize, 6);
+  const terminal = model.appOptions.items.find((a) => a.id === 'com.apple.Terminal');
+  assert.deepEqual(terminal, { id: 'com.apple.Terminal', ascii_mode: true, no_inline: true });
+  const macvim = model.appOptions.items.find((a) => a.id === 'org.vim.MacVim');
+  assert.equal(macvim.ascii_mode, true);
+  assert.equal(macvim.no_inline, true);
+  assert.equal(model.meta.defaultCustomMtime, null);
+});
+
+test('page_size 生效值以部署后的 build 为准', () => {
+  const dir = makeFixture();
+  fs.writeFileSync(
+    path.join(dir, 'default.custom.yaml'),
+    'patch:\n  menu:\n    page_size: 7\n',
+  );
+  assert.equal(readModel(dir).menu.pageSize, 6);
+  redeployDefault(dir, 7);
+  assert.equal(readModel(dir).menu.pageSize, 7);
+});
+
+test('page_size 写入 default.custom.yaml、备份标记并整体撤销', () => {
+  const dir = makeFixture();
+  const model = readModel(dir);
+  const result = applyEdits(dir, {
+    schemeId: 'wechat',
+    sync: false,
+    values: lightValues(model),
+    expectedMtime: model.meta.customMtime,
+    pageSize: 8,
+    pageSizeMtime: model.meta.defaultCustomMtime,
+  });
+  assert.equal(result.changed, true);
+  const parsed = parse(
+    fs.readFileSync(path.join(dir, 'default.custom.yaml'), 'utf8'),
+    { schema: 'failsafe' },
+  );
+  assert.equal(parsed.patch.menu.page_size, '8');
+  assert.equal(result.pageSize.backupPath, null);
+
+  const marker = JSON.parse(
+    fs.readFileSync(path.join(dir, '.panel-backups', 'last-apply.json'), 'utf8'),
+  );
+  const entry = marker.entries.find((e) => e.file === 'default.custom.yaml');
+  assert.ok(entry);
+  assert.equal(entry.backup, undefined);
+
+  const undone = undoLast(dir);
+  assert.ok(!fs.existsSync(path.join(dir, 'default.custom.yaml')));
+  assert.ok(!fs.existsSync(path.join(dir, '.panel-backups', 'last-apply.json')));
+});
+
+test('page_size 与生效值一致时不写 default.custom.yaml', () => {
+  const dir = makeFixture();
+  const model = readModel(dir);
+  const result = applyEdits(dir, {
+    schemeId: 'wechat',
+    sync: false,
+    values: {},
+    expectedMtime: model.meta.customMtime,
+    pageSize: 6,
+    pageSizeMtime: null,
+  });
+  assert.equal(result.pageSize.changed, false);
+  assert.ok(!fs.existsSync(path.join(dir, 'default.custom.yaml')));
+});
+
+test('page_size 校验', () => {
+  assert.throws(() => validatePageSize(0), /1 到 9/);
+  assert.throws(() => validatePageSize(10), /1 到 9/);
+  assert.throws(() => validatePageSize(4.5), /整数/);
+  assert.throws(() => validatePageSize('x'), /整数/);
+  assert.equal(validatePageSize('8'), 8);
+});
+
+test('page_size 部署校验', () => {
+  const dir = makeFixture();
+  const model = readModel(dir);
+  applyEdits(dir, {
+    schemeId: 'wechat',
+    sync: false,
+    values: {},
+    expectedMtime: model.meta.customMtime,
+    pageSize: 8,
+    pageSizeMtime: null,
+  });
+  const mismatches = verifyPageSize(dir, 8);
+  assert.equal(mismatches.length, 1);
+  assert.match(mismatches[0], /menu\.page_size/);
+  redeployDefault(dir, 8);
+  assert.deepEqual(verifyPageSize(dir, 8), []);
+});
+
+test('default.custom.yaml 并发修改检测', () => {
+  const dir = makeFixture();
+  fs.writeFileSync(
+    path.join(dir, 'default.custom.yaml'),
+    'patch:\n  menu:\n    page_size: 7\n',
+  );
+  const model = readModel(dir);
+  assert.throws(
+    () =>
+      applyEdits(dir, {
+        schemeId: 'wechat',
+        sync: false,
+        values: {},
+        expectedMtime: model.meta.customMtime,
+        pageSize: 8,
+        pageSizeMtime: model.meta.defaultCustomMtime - 10000,
+      }),
+    /default\.custom\.yaml/,
+  );
+});
+
+test('外部改动 default.custom.yaml 后拒绝撤销', () => {
+  const dir = makeFixture();
+  const model = readModel(dir);
+  applyEdits(dir, {
+    schemeId: 'wechat',
+    sync: false,
+    values: {},
+    expectedMtime: model.meta.customMtime,
+    pageSize: 8,
+    pageSizeMtime: null,
+  });
+  fs.appendFileSync(path.join(dir, 'default.custom.yaml'), '\n# 外部修改\n');
+  assert.throws(() => undoLast(dir), /又被修改过/);
+});
+
+test('app_options 按差异写最小补丁、移除与新增', () => {
+  const dir = makeFixture();
+  const model = readModel(dir);
+  const values = lightValues(model);
+  applyEdits(dir, {
+    schemeId: 'wechat',
+    sync: false,
+    values,
+    expectedMtime: model.meta.customMtime,
+    appOptions: [
+      { id: 'com.apple.Terminal', ascii_mode: false, no_inline: true },
+      { id: 'org.vim.MacVim', ascii_mode: true, no_inline: true },
+      { id: 'com.example.New', ascii_mode: true, no_inline: false },
+    ],
+  });
+  const parsed = parse(
+    fs.readFileSync(path.join(dir, 'squirrel.custom.yaml'), 'utf8'),
+    { schema: 'failsafe' },
+  );
+  const apps = parsed.patch.app_options;
+  assert.deepEqual(apps['com.apple.Terminal'], { ascii_mode: 'false' });
+  assert.equal(apps['org.vim.MacVim'], undefined);
+  assert.deepEqual(apps['com.example.New'], { ascii_mode: 'true' });
+
+  // 从列表中移除：build 自带条目写 null 覆盖，纯自定义条目删除
+  const m2 = readModel(dir);
+  applyEdits(dir, {
+    schemeId: 'wechat',
+    sync: false,
+    values: lightValues(m2),
+    expectedMtime: m2.meta.customMtime,
+    appOptions: m2.appOptions.items
+      .filter((a) => a.id !== 'com.apple.Terminal' && a.id !== 'com.example.New')
+      .map(({ id, ascii_mode, no_inline }) => ({ id, ascii_mode, no_inline })),
+  });
+  const parsed2 = parse(
+    fs.readFileSync(path.join(dir, 'squirrel.custom.yaml'), 'utf8'),
+    { schema: 'failsafe' },
+  );
+  // 移除标记：yaml 里 null 可写作空值或 null 字面量，Rime 都按删除处理
+  const removed = parsed2.patch.app_options['com.apple.Terminal'];
+  assert.ok(removed === null || removed === 'null' || removed === '');
+  assert.equal(parsed2.patch.app_options['com.example.New'], undefined);
+});
+
+test('app_options 保留手写条目的未知键', () => {
+  const dir = makeFixture();
+  fs.appendFileSync(
+    path.join(dir, 'squirrel.custom.yaml'),
+    '  app_options:\n    org.vim.MacVim:\n      vim_mode: true\n      ascii_mode: true\n',
+  );
+  const model = readModel(dir);
+  applyEdits(dir, {
+    schemeId: 'wechat',
+    sync: false,
+    values: {},
+    expectedMtime: model.meta.customMtime,
+    appOptions: model.appOptions.items.map(({ id, ascii_mode, no_inline }) => ({
+      id,
+      ascii_mode,
+      no_inline,
+    })),
+  });
+  const parsed = parse(
+    fs.readFileSync(path.join(dir, 'squirrel.custom.yaml'), 'utf8'),
+    { schema: 'failsafe' },
+  );
+  assert.equal(parsed.patch.app_options['org.vim.MacVim'].vim_mode, 'true');
+  assert.equal(parsed.patch.app_options['org.vim.MacVim'].ascii_mode, 'true');
+});
+
+test('app_options 省略 build 自带条目时写 null 移除', () => {
+  const dir = makeFixture();
+  const model = readModel(dir);
+  applyEdits(dir, {
+    schemeId: 'wechat',
+    sync: false,
+    values: {},
+    expectedMtime: model.meta.customMtime,
+    appOptions: [{ id: 'com.apple.Terminal', ascii_mode: true, no_inline: true }],
+  });
+  const parsed = parse(
+    fs.readFileSync(path.join(dir, 'squirrel.custom.yaml'), 'utf8'),
+    { schema: 'failsafe' },
+  );
+  const removed = parsed.patch.app_options['org.vim.MacVim'];
+  assert.ok(removed === null || removed === 'null' || removed === '');
+  assert.deepEqual(
+    readModel(dir).appOptions.items.map((app) => app.id),
+    ['com.apple.Terminal'],
+  );
+});
+
+test('app_options 新增无覆盖的应用仍保留条目', () => {
+  const dir = makeFixture();
+  const model = readModel(dir);
+  applyEdits(dir, {
+    schemeId: 'wechat',
+    sync: false,
+    values: {},
+    expectedMtime: model.meta.customMtime,
+    appOptions: [
+      ...model.appOptions.items.map(({ id, ascii_mode, no_inline }) => ({ id, ascii_mode, no_inline })),
+      { id: 'com.example.Empty', ascii_mode: false, no_inline: false },
+    ],
+  });
+  const parsed = parse(
+    fs.readFileSync(path.join(dir, 'squirrel.custom.yaml'), 'utf8'),
+    { schema: 'failsafe' },
+  );
+  assert.deepEqual(parsed.patch.app_options['com.example.Empty'], {});
+  assert.ok(
+    readModel(dir).appOptions.items.some((app) => app.id === 'com.example.Empty'),
+  );
+});
+
+test('app_options 校验', () => {
+  assert.throws(() => validateAppOptions('nope'), /格式不正确/);
+  assert.throws(() => validateAppOptions([{ id: 'a b' }]), /Bundle ID/);
+  assert.throws(() => validateAppOptions([{ id: 'ok.id', ascii_mode: 'yes' }]), /布尔/);
+  assert.throws(() => validateAppOptions([{ id: 'x' }, { id: 'x' }]), /重复/);
 });

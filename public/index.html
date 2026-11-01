@@ -19,6 +19,7 @@
       <span class="path" id="filePath">~/Library/Rime/squirrel.custom.yaml</span>
       <span class="dot-sep"></span>
       <span id="backupInfo">—</span>
+      <button type="button" class="link-btn" id="deployLogBtn">部署日志</button>
     </div>
   </div>
 </header>
@@ -73,7 +74,10 @@
         <span class="switch"></span>
       </label>
       <div id="layoutExtra"></div>
+      <div id="menuExtra"></div>
     </div>
+
+    <div class="card" id="appCard"></div>
   </section>
 </main>
 
@@ -89,6 +93,7 @@
         <span class="checkbox"></span>
         同步字号与形状到另一套配色
       </label>
+      <button type="button" class="action" id="reloadBtn" hidden>手动重新部署</button>
       <button type="button" class="action" id="undoBtn" disabled>撤销上次应用</button>
       <button type="button" class="action" id="resetBtn">还原为文件值</button>
       <button type="button" class="action primary" id="applyBtn" disabled>

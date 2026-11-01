@@ -4,14 +4,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import {
+  appendDeployLog,
   applyEdits,
   readModel,
   resolveRimeDir,
   rimePaths,
   undoLast,
+  verifyPageSize,
   verifyValues,
 } from './lib/config.mjs';
-import { deploy } from './lib/rime.mjs';
+import { MAX_DEPLOY_WAIT_MS, deploy } from './lib/rime.mjs';
 import { resolveFontFace } from './lib/fonts.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -61,6 +63,14 @@ function readBody(req) {
     });
     req.on('error', reject);
   });
+}
+
+function hasEditableValues(values) {
+  if (!values || typeof values !== 'object') return false;
+  const hasGroup = ['typography', 'layout', 'colors'].some(
+    (key) => values[key] && Object.keys(values[key]).length > 0,
+  );
+  return hasGroup || values.candidateFormat !== undefined || values.name !== undefined;
 }
 
 function checkOrigin(req, port) {
@@ -129,10 +139,76 @@ function makeHandler(port) {
         return;
       }
 
+      if (url.pathname === '/api/reload' && req.method === 'POST') {
+        const deployResult = await deploy({ rimeDir, totalBudgetMs: MAX_DEPLOY_WAIT_MS });
+        appendDeployLog(rimeDir, {
+          scheme: '手动重新部署',
+          changed: false,
+          targets: [],
+          deployed: deployResult.deployed,
+          verified: deployResult.deployed,
+          waitedMs: deployResult.waitedMs,
+          mismatches: deployResult.mismatches,
+        });
+        sendJson(res, 200, {
+          ok: deployResult.deployed,
+          deploy: deployResult,
+          warning: deployResult.deployed
+            ? null
+            : '鼠须管未在超时时间内完成部署',
+        });
+        return;
+      }
+
       if (url.pathname === '/api/apply' && req.method === 'POST') {
         const body = await readBody(req);
-        const result = applyEdits(rimeDir, body);
+        const startedAt = Date.now();
+        const targets = [];
+        if (body.values && hasEditableValues(body.values)) targets.push('squirrel.custom.yaml');
+        if (body.pageSize !== undefined && body.pageSize !== null) {
+          targets.push('default.custom.yaml');
+        }
+        if (body.appOptions !== undefined) targets.push('app_options');
+        const verify = () => {
+          const mismatches = [];
+          if (body.values && hasEditableValues(body.values)) {
+            mismatches.push(
+              ...verifyValues(rimeDir, {
+                schemeId: body.schemeId,
+                sync: body.sync,
+                values: body.values,
+              }),
+            );
+          }
+          if (body.pageSize !== undefined && body.pageSize !== null) {
+            mismatches.push(...verifyPageSize(rimeDir, body.pageSize));
+          }
+          return mismatches;
+        };
+        let result;
+        try {
+          result = applyEdits(rimeDir, body);
+        } catch (error) {
+          appendDeployLog(rimeDir, {
+            scheme: body.schemeId ?? null,
+            changed: false,
+            targets,
+            deployed: false,
+            verified: false,
+            waitedMs: Date.now() - startedAt,
+            error: error.message,
+          });
+          throw error;
+        }
         if (!result.changed) {
+          appendDeployLog(rimeDir, {
+            scheme: body.schemeId ?? null,
+            changed: false,
+            targets,
+            deployed: false,
+            verified: true,
+            waitedMs: Date.now() - startedAt,
+          });
           sendJson(res, 200, {
             ok: true,
             changed: false,
@@ -141,14 +217,22 @@ function makeHandler(port) {
           });
           return;
         }
+        // 写入本身很快，剩余预算交给部署轮询
         const deployResult = await deploy({
           rimeDir,
-          verify: () =>
-            verifyValues(rimeDir, {
-              schemeId: body.schemeId,
-              sync: body.sync,
-              values: body.values,
-            }),
+          totalBudgetMs: Math.max(5000, MAX_DEPLOY_WAIT_MS - (Date.now() - startedAt)),
+          deadlineLabel:
+            body.pageSize !== undefined && body.pageSize !== null ? '每页候选数' : '',
+          verify,
+        });
+        appendDeployLog(rimeDir, {
+          scheme: body.schemeId ?? null,
+          changed: true,
+          targets,
+          deployed: deployResult.deployed,
+          verified: deployResult.verified,
+          waitedMs: deployResult.waitedMs,
+          mismatches: deployResult.mismatches,
         });
         sendJson(res, 200, {
           ok: deployResult.verified,
@@ -165,8 +249,21 @@ function makeHandler(port) {
       }
 
       if (url.pathname === '/api/undo' && req.method === 'POST') {
+        const startedAt = Date.now();
         const result = undoLast(rimeDir);
-        const deployResult = await deploy({ rimeDir });
+        const deployResult = await deploy({
+          rimeDir,
+          totalBudgetMs: Math.max(5000, MAX_DEPLOY_WAIT_MS - (Date.now() - startedAt)),
+        });
+        appendDeployLog(rimeDir, {
+          scheme: '撤销',
+          changed: true,
+          targets: ['squirrel.custom.yaml'],
+          deployed: deployResult.deployed,
+          verified: deployResult.deployed,
+          waitedMs: deployResult.waitedMs,
+          mismatches: deployResult.mismatches,
+        });
         sendJson(res, 200, {
           ok: deployResult.deployed,
           ...result,

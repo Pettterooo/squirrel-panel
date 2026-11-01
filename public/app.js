@@ -5,6 +5,9 @@ const SAMPLE = [
   { label: '4', text: '熟入', comment: '' },
   { label: '5', text: '输出', comment: '' },
   { label: '6', text: '如', comment: '' },
+  { label: '7', text: '侵入', comment: '' },
+  { label: '8', text: '乳', comment: '' },
+  { label: '9', text: '汝', comment: '' },
 ];
 
 const COLOR_ORDER = [
@@ -60,7 +63,10 @@ const ALL_SLIDER_CONTROLS = [
   ...LAYOUT_EXTRA_CONTROLS,
 ];
 
-const SLIDER_BY_KEY = new Map(ALL_SLIDER_CONTROLS.map((control) => [control.key, control]));
+const SLIDER_BY_KEY = new Map(
+  [...ALL_SLIDER_CONTROLS, { key: 'page_size', label: '每页候选数', min: 1, max: 9, step: 1, unit: '' }]
+    .map((control) => [control.key, control]),
+);
 
 // 文本框：id → 配置键；字体都是 typography 键（candidateFormat 是顶层键，单独处理）
 const TEXT_INPUT_KEYS = {
@@ -69,16 +75,30 @@ const TEXT_INPUT_KEYS = {
   commentFontFace: 'comment_font_face',
 };
 
+const PAGE_SIZE_CONTROL = { key: 'page_size', label: '每页候选数', min: 1, max: 9, step: 1, unit: '' };
+const COUNTDOWN_MS = 60000;
+
+const APP_SWITCHES = [
+  { key: 'ascii_mode', label: '默认英文' },
+  { key: 'no_inline', label: '关闭内嵌编码' },
+];
+
 const state = {
   data: null,
   schemeId: null,
   values: {},
   baseline: {},
+  pageSize: 6,
+  baselinePageSize: 6,
+  appItems: [],
+  baselineAppItems: [],
   activeIndex: 0,
   busy: false,
   dirty: false,
   statusKind: 'idle',
   fontInfo: {},
+  deadlineId: 0,
+  deployDeadline: 0,
 };
 
 const el = (id) => document.getElementById(id);
@@ -220,6 +240,21 @@ function sliderHtml(control, value) {
     </div>`;
 }
 
+function appRowHtml(app) {
+  return `
+    <div class="app-row" data-app="${esc(app.id)}">
+      <span class="app-name" title="${esc(app.id)}">${esc(app.id)}</span>
+      <div class="app-switches">
+        ${APP_SWITCHES.map(({ key, label }) => `
+          <label class="chip-switch" title="${esc(label)}">
+            <input type="checkbox" data-app-key="${key}" ${app[key] ? 'checked' : ''}>
+            <span>${esc(label)}</span>
+          </label>`).join('')}
+        <button type="button" class="app-remove" data-app-remove title="移除">移除</button>
+      </div>
+    </div>`;
+}
+
 function renderControls() {
   const values = currentValues();
   const labels = state.data.labels;
@@ -345,6 +380,18 @@ function renderControls() {
 
   el('inlinePreedit').checked = Boolean(values.layout.inline_preedit);
   el('showPaging').checked = Boolean(values.layout.show_paging);
+
+  el('menuExtra').innerHTML = sliderHtml(PAGE_SIZE_CONTROL, state.pageSize);
+
+  el('appCard').innerHTML = `
+    <div class="card-title">按应用</div>
+    ${state.appItems.length ? state.appItems.map(appRowHtml).join('') : '<p class="empty">—</p>'}
+    <form class="app-add" id="appAdd">
+      <input type="text" name="bundle" placeholder="com.example.App" spellcheck="false"
+        autocomplete="off" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" required>
+      <button type="submit" class="action" ${state.busy ? 'disabled' : ''}>添加</button>
+    </form>
+  `;
 
   document.querySelectorAll('#layoutSeg button').forEach((button) => {
     button.classList.toggle('active', button.dataset.layout === values.layout.candidate_list_layout);
@@ -519,7 +566,9 @@ function renderPagingStrip() {
 
 function renderCandidates() {
   const template = currentValues().candidateFormat || '[label]. [candidate] [comment]';
-  el('cands').innerHTML = SAMPLE.map((item, index) => {
+  const items = SAMPLE.slice(0, Math.max(1, state.pageSize));
+  if (state.activeIndex >= items.length) state.activeIndex = 0;
+  el('cands').innerHTML = items.map((item, index) => {
     const active = index === state.activeIndex ? 'active' : '';
     const segments = buildSegments(template, item.label, item.text, item.comment)
       .map((segment) => `<span class="seg ${segment.cls}">${esc(segment.text)}</span>`)
@@ -592,6 +641,7 @@ function renderReadout() {
     chip(`上下留白 ${fmt(l.border_height + l.corner_radius, 1)}pt`),
     chip(`行距 ${l.line_spacing}`),
     chip(l.candidate_list_layout === 'stacked' ? '竖排' : '横排'),
+    chip(`每页 ${state.pageSize}`),
   ];
   if (l.alpha < 100) chips.push(chip(`透明 ${l.alpha}%`));
   if (l.show_paging) chips.push(chip('翻页'));
@@ -607,6 +657,8 @@ function setStatus(kind, text) {
 }
 
 function isDirty() {
+  if (state.pageSize !== state.baselinePageSize) return true;
+  if (JSON.stringify(state.appItems) !== JSON.stringify(state.baselineAppItems)) return true;
   return JSON.stringify(state.values[state.schemeId]) !== JSON.stringify(state.baseline[state.schemeId]);
 }
 
@@ -643,7 +695,8 @@ function onControlInput(event) {
   if (target.matches('input[type="range"][data-key]')) {
     const key = target.dataset.key;
     const value = Number(target.value);
-    setValue(key, value);
+    if (key === 'page_size') state.pageSize = value;
+    else setValue(key, value);
     const control = SLIDER_BY_KEY.get(key);
     if (control) {
       const field = target.closest('.field');
@@ -692,6 +745,13 @@ function optionalColorDefault(key) {
 function onControlChange(event) {
   const target = event.target;
   if (state.busy) return;
+  if (target.matches('input[data-app-key]')) {
+    const id = target.closest('.app-row').dataset.app;
+    const item = state.appItems.find((app) => app.id === id);
+    if (item) item[target.dataset.appKey] = target.checked;
+    afterEdit();
+    return;
+  }
   if (target.matches('input[data-optcolor]')) {
     const key = target.dataset.optcolor;
     const colors = currentValues().colors;
@@ -764,6 +824,78 @@ function confirmDialog({ title, message, confirmText = '确定', cancelText = '�
   });
 }
 
+function logTime(iso) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return String(iso);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function logOutcome(entry) {
+  if (entry.error) return `失败：${entry.error}`;
+  if (!entry.changed) return '无改动';
+  const parts = [entry.deployed ? '已部署' : '未部署'];
+  if (entry.verified) parts.push('校验通过');
+  else if (entry.mismatches?.length) parts.push(`校验不符 ${entry.mismatches.length} 项`);
+  if (entry.waitedMs != null) parts.push(`${(entry.waitedMs / 1000).toFixed(1)} 秒`);
+  return parts.join(' · ');
+}
+
+function deployLogDialog(entries) {
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.className = 'dialog-overlay';
+    overlay.innerHTML = `
+      <div class="dialog" role="dialog" aria-modal="true" aria-label="部署日志">
+        <p class="dialog-title">部署日志</p>
+        <ul class="log-list">
+          ${entries.map((entry) => `
+            <li class="log-item">
+              <span class="log-time">${esc(logTime(entry.at))}</span>
+              <span class="log-scheme">${esc(entry.scheme ?? '—')}</span>
+              <span class="log-outcome ${entry.error ? 'bad' : entry.verified ? 'good' : 'warn'}">${esc(logOutcome(entry))}</span>
+              ${entry.targets?.length ? `<span class="log-targets">${esc(entry.targets.join('、'))}</span>` : ''}
+              ${entry.mismatches?.length ? `<span class="log-detail">${esc(entry.mismatches.join('；'))}</span>` : ''}
+            </li>`).join('')}
+        </ul>
+        <div class="dialog-actions">
+          <button type="button" class="action primary" data-result="close">关闭</button>
+        </div>
+      </div>`;
+    const close = () => {
+      document.removeEventListener('keydown', onKey, true);
+      overlay.remove();
+      resolve();
+    };
+    const onKey = (event) => {
+      if (event.key === 'Escape' || event.key === 'Enter') {
+        event.preventDefault();
+        close();
+      }
+    };
+    overlay.addEventListener('click', (event) => {
+      if (event.target.closest('button[data-result]') || event.target === overlay) close();
+    });
+    document.addEventListener('keydown', onKey, true);
+    document.body.appendChild(overlay);
+    overlay.querySelector('button[data-result="close"]').focus();
+  });
+}
+
+async function showDeployLog() {
+  if (!state.data) return;
+  let entries = state.data.meta.deployLog ?? [];
+  if (!entries.length) {
+    await loadConfig({ keepStatus: true });
+    entries = state.data.meta.deployLog ?? [];
+  }
+  if (!entries.length) {
+    setStatus('idle', '还没有应用记录');
+    return;
+  }
+  await deployLogDialog(entries);
+}
+
 async function loadConfig({ keepStatus = false } = {}) {
   const data = await api('/api/config');
   state.data = data;
@@ -778,11 +910,16 @@ async function loadConfig({ keepStatus = false } = {}) {
     state.values[id] = editable;
     state.baseline[id] = clone(editable);
   }
+  state.pageSize = data.menu.pageSize;
+  state.baselinePageSize = data.menu.pageSize;
+  state.appItems = clone(data.appOptions.items);
+  state.baselineAppItems = clone(data.appOptions.items);
 
   const home = data.meta.customPath.replace(/^\/Users\/[^/]+/, '~');
   el('filePath').textContent = home;
   el('filePath').title = data.meta.customPath;
   el('backupInfo').textContent = `${data.meta.backupCount} 个备份`;
+  el('deployLogBtn').hidden = !(data.meta.deployLog?.length > 0);
   el('versionBadge').textContent = data.meta.rimeVersion
     ? `Squirrel · librime ${data.meta.rimeVersion}`
     : 'Squirrel';
@@ -810,9 +947,21 @@ async function applyChanges() {
     values,
     expectedMtime: state.data.meta.customMtime,
   };
+  if (state.pageSize !== state.baselinePageSize) {
+    payload.pageSize = state.pageSize;
+    payload.pageSizeMtime = state.data.meta.defaultCustomMtime;
+  }
+  if (JSON.stringify(state.appItems) !== JSON.stringify(state.baselineAppItems)) {
+    payload.appOptions = state.appItems.map((app) => ({
+      id: app.id,
+      ascii_mode: Boolean(app.ascii_mode),
+      no_inline: Boolean(app.no_inline),
+    }));
+  }
 
   state.busy = true;
   setBusy(true);
+  startDeadline('写入');
   setStatus('busy', '正在写入配置并重载鼠须管…');
   try {
     const result = await api('/api/apply', {
@@ -820,6 +969,7 @@ async function applyChanges() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
+    clearDeadline();
     await loadConfig({ keepStatus: true });
     if (result.ok) {
       const seconds = result.deploy?.waitedMs ? (result.deploy.waitedMs / 1000).toFixed(1) : '—';
@@ -830,11 +980,64 @@ async function applyChanges() {
       setStatus('warn', result.warning || '配置已写入，但部署校验未通过');
     }
   } catch (error) {
+    clearDeadline();
     setStatus('error', error.message);
   } finally {
     state.busy = false;
     setBusy(false);
   }
+}
+
+async function manualReload() {
+  if (state.busy) return;
+  state.busy = true;
+  setBusy(true);
+  startDeadline('重载');
+  setStatus('busy', '正在重新部署鼠须管…');
+  try {
+    const result = await api('/api/reload', { method: 'POST' });
+    clearDeadline();
+    await loadConfig({ keepStatus: true });
+    setStatus(result.ok ? 'ok' : 'warn', result.ok ? '已重新部署完成' : result.warning);
+  } catch (error) {
+    clearDeadline();
+    setStatus('error', error.message);
+  } finally {
+    state.busy = false;
+    setBusy(false);
+  }
+}
+
+function startDeadline(action) {
+  clearDeadline();
+  state.deployDeadline = Date.now() + COUNTDOWN_MS;
+  el('reloadBtn').hidden = false;
+  let lastSeconds = -1;
+  const tick = () => {
+    const remaining = state.deployDeadline - Date.now();
+    if (remaining <= 0) {
+      state.deadlineId = 0;
+      setStatus(
+        'warn',
+        `部署超过 ${COUNTDOWN_MS / 1000} 秒未完成；鼠须管可能仍在部署，可点“手动重新部署”`,
+      );
+      return;
+    }
+    const seconds = Math.ceil(remaining / 1000);
+    if (seconds !== lastSeconds) {
+      lastSeconds = seconds;
+      setStatus('busy', `正在${action}并等待鼠须管部署生效（剩余 ${seconds} 秒）`);
+    }
+    state.deadlineId = setTimeout(tick, 200);
+  };
+  tick();
+}
+
+function clearDeadline() {
+  if (state.deadlineId) clearTimeout(state.deadlineId);
+  state.deadlineId = 0;
+  state.deployDeadline = 0;
+  el('reloadBtn').hidden = true;
 }
 
 async function undoChanges() {
@@ -867,6 +1070,8 @@ async function undoChanges() {
 function resetToFile() {
   if (state.busy) return;
   state.values[state.schemeId] = clone(state.baseline[state.schemeId]);
+  state.pageSize = state.baselinePageSize;
+  state.appItems = clone(state.baselineAppItems);
   render();
   setStatus('idle', '已还原为配置文件中的值');
 }
@@ -947,6 +1152,37 @@ el('cands').addEventListener('mouseleave', () => {
 el('applyBtn').addEventListener('click', applyChanges);
 el('undoBtn').addEventListener('click', undoChanges);
 el('resetBtn').addEventListener('click', resetToFile);
+el('reloadBtn').addEventListener('click', manualReload);
+el('deployLogBtn').addEventListener('click', showDeployLog);
+
+el('appCard').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-app-remove]');
+  if (!button || state.busy) return;
+  const id = button.closest('.app-row').dataset.app;
+  state.appItems = state.appItems.filter((app) => app.id !== id);
+  renderControls();
+  afterEdit();
+});
+
+el('appCard').addEventListener('submit', (event) => {
+  event.preventDefault();
+  if (state.busy) return;
+  const input = event.target.elements.bundle;
+  const id = String(input.value || '').trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) || id.length > 200) {
+    setStatus('error', 'Bundle ID 格式不正确');
+    return;
+  }
+  if (state.appItems.some((app) => app.id === id)) {
+    setStatus('warn', '该应用已在列表中');
+    return;
+  }
+  state.appItems.push({ id, ascii_mode: false, no_inline: false });
+  state.appItems.sort((a, b) => a.id.localeCompare(b.id));
+  renderControls();
+  afterEdit();
+  el('appCard').querySelector('input[name="bundle"]')?.focus();
+});
 el('syncSchemes').addEventListener('change', () => {
   if (state.dirty) setStatus('dirty', '有未应用的修改');
 });

@@ -1,16 +1,17 @@
 # squirrel-panel · 鼠须管外观面板
 
-一个为 macOS 输入法 [鼠须管（Squirrel）](https://github.com/rime/squirrel) 做的可视化外观调节面板：打开网页、拖动滑块、实时预览，一键写入 `squirrel.custom.yaml` 并自动重新部署鼠须管。
+一个为 macOS 输入法 [鼠须管（Squirrel）](https://github.com/rime/squirrel) 做的可视化外观调节面板：打开网页、拖动滑块、实时预览，一键写入 `squirrel.custom.yaml`（以及每页候选数所在的 `default.custom.yaml`）并自动重新部署鼠须管。
 
-不需要改任何代码，不需要手动编辑 YAML。面板只读写 `squirrel.custom.yaml` 这一个文件，每次写入前自动备份，支持一键撤销。
+不需要改任何代码，不需要手动编辑 YAML。面板只以 `patch` 补丁的方式读写这两个用户配置文件，每次写入前自动备份，支持一键撤销。
 
 ## 功能
 
 - 自动读取本机鼠须管配置（`~/Library/Rime/squirrel.custom.yaml` 与部署产物 `build/squirrel.yaml`），浅色/深色两套配色分别可调
 - 实时预览：按 Squirrel 1.1.2 的绘制几何计算（1 pt = 1 px、留白含窗口圆角、候选间为两个空格宽），字体用 macOS 字体接口探测真实回退结果
 - 全部外观参数：字号、字体、边距、圆角、行距、颜色、候选格式、排列方向、翻页区、不透明度、内嵌编码等
+- 输入引擎参数「每页候选数」（`menu/page_size`）与「按应用设置」（`app_options`）：前者写入 `default.custom.yaml`，后者写入 `squirrel.custom.yaml`
 - 应用后自动调用鼠须管命令行重新部署，并校验部署产物确认生效；未安装鼠须管时仍可编辑，只是无法自动重载
-- 每次应用前把原文件备份到 `~/Library/Rime/.panel-backups/`（保留最近 20 份），面板内可一键撤销上次应用
+- 每次应用前把原文件备份到 `~/Library/Rime/.panel-backups/`（保留最近 20 份），面板内可一键撤销上次应用；应用与撤销记录可在顶部「部署日志」查看，部署超时后可点「手动重新部署」
 - 服务只监听 `127.0.0.1`，其他程序无法访问
 
 ## 安装
@@ -40,6 +41,7 @@ npm start        # 或直接双击 启动面板.command
 2. 左侧实时预览，右侧调整参数。修改后点底部「应用到鼠须管」或按 `⌘S`
 3. 「同步字号与形状到另一套配色」勾选时，字号、字体、圆角、边距、候选格式会同时写入另一套配色；颜色与方案名称始终只作用于当前配色
 4. 「撤销上次应用」恢复上一次写入前的文件；「还原为文件值」丢弃未应用的修改
+5. 部署较慢时底部会倒计时，超时后可点「手动重新部署」；顶部「部署日志」查看每次应用/撤销的部署结果与耗时
 
 ## 参数对照表
 
@@ -114,11 +116,26 @@ npm start        # 或直接双击 启动面板.command
 | `candidate_format` | 候选模板。占位符：`[label]`＝序号、`[candidate]`＝候选、`[comment]`＝注释；也支持鼠须管写法 `%c`＝序号、`%@`＝候选＋注释 | `[label]. [candidate] [comment]` |
 | `name` | 方案名称（只写当前方案，不同步） | 方案 id |
 
+### 输入引擎与按应用参数
+
+| 参数 | 含义 | 范围 | 默认值 | 写入位置 |
+| --- | --- | --- | --- | --- |
+| `menu/page_size` | 每页候选数（面板预览会按此数量渲染候选） | 1–9 | 5（鼠须管默认部署为 6） | `default.custom.yaml` |
+
+「按应用设置」列出 `app_options` 中生效的应用（Bundle ID），每项两个开关：
+
+| 开关 | 含义 | 级别 |
+| --- | --- | --- |
+| `ascii_mode` | 在该应用里默认英文输入 | 应用 |
+| `no_inline` | 在该应用里关闭内嵌编码 | 应用 |
+
+面板按差异写补丁：只改变化的键；从列表里移除一项会写成 `null`（删除该应用的覆盖），鼠须管自带的默认条目不受影响。你在 `app_options` 下手写的其它键（如 `vim_mode`）会被原样保留。
+
 ## 工作原理
 
-1. 面板启动时读取 `~/Library/Rime/squirrel.custom.yaml`（用户补丁）与 `~/Library/Rime/build/squirrel.yaml`（部署产物），按鼠须管的加载顺序合成两套配色的生效值
-2. 「应用」时只修改 `squirrel.custom.yaml` 的 `patch` 块：写入前把原文件备份到 `~/Library/Rime/.panel-backups/`，写入后调用 `/Library/Input Methods/Squirrel.app/Contents/MacOS/Squirrel --reload` 重新部署
-3. 部署完成后重新读取 `build/squirrel.yaml` 校验是否生效；不一致时面板会明确提示
+1. 面板启动时读取 `~/Library/Rime/squirrel.custom.yaml`（用户补丁）与 `~/Library/Rime/build/squirrel.yaml`（部署产物），按鼠须管的加载顺序合成两套配色的生效值；每页候选数取自 `build/default.yaml`
+2. 「应用」时只修改两个配置文件的 `patch` 块：写入前把已存在的原文件备份到 `~/Library/Rime/.panel-backups/`，写入后调用 `/Library/Input Methods/Squirrel.app/Contents/MacOS/Squirrel --reload` 重新部署
+3. 部署完成后重新读取 `build/squirrel.yaml` 与 `build/default.yaml` 校验是否生效；不一致时面板会明确提示。撤销会把这次涉及的两个文件一起恢复到应用之前
 4. 预览按 Squirrel 1.1.2 源码的绘制几何计算；字体栅格化仍可能有亚像素差异，翻页区、竖排与窗口透明度为示意
 
 ## 常见问题
@@ -141,7 +158,7 @@ xattr -dr com.apple.quarantine "启动面板.command"
 面板能正常读取和编辑配置文件（若存在），但无法自动重载生效，会提示先安装鼠须管。
 
 **面板会改我别的配置文件吗？**
-不会。只读写 `squirrel.custom.yaml` 与备份目录 `~/Library/Rime/.panel-backups/`；其他 rime 文件一概不动。若担心，删除备份目录前可先查看其中 `.bak` 文件。
+不会。只读写 `squirrel.custom.yaml`、`default.custom.yaml`（仅当你调整每页候选数时）与备份目录 `~/Library/Rime/.panel-backups/`；其他 rime 文件一概不动。若担心，删除备份目录前可先查看其中 `.bak` 文件。
 
 **如何卸载？**
 删除面板文件夹即可。面板写入的配置留在 `squirrel.custom.yaml` 的 `patch` 块里，如需还原可在面板里点「撤销上次应用」，或删除 `patch:` 下对应的段落后重新部署。
@@ -150,7 +167,7 @@ xattr -dr com.apple.quarantine "启动面板.command"
 
 ```bash
 npm install
-npm test         # 22 个单元测试（node:test）
+npm test         # 35 个单元测试（node:test）
 npm start        # 127.0.0.1:47831
 ```
 
